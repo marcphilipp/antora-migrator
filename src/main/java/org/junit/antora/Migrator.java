@@ -44,18 +44,34 @@ public class Migrator {
             doc.replace("include::{includedir}/link-attributes.adoc[]\n\n", "");
 //            doc.fixLinks();
         });
+
+        try (var listing = Files.list(asciidocSrcDir.resolve("release-notes"))) {
+            var targetDir = Files.createDirectories(antoraModuleDir.resolve("partials/release-notes"));
+            listing.filter(it -> it.getFileName().toString().matches("release-notes-\\d.+\\.adoc"))
+                    .forEach(releaseNoteFile -> migrate(releaseNoteFile, targetDir.resolve(releaseNoteFile.getFileName())));
+        }
     }
 
-    private void migrate(Path source, Path target, Consumer<Document> consumer) throws Exception {
-        Files.createDirectories(target.getParent());
-        Files.copy(source, target);
-        exec("git", "add", target);
-        exec("git", "commit", "-m", "Move %s to Antora module".formatted(target.getFileName()));
-        var document = new Document(Files.readString(target));
-        consumer.accept(document);
-        Files.writeString(target, document.text);
-        exec("git", "add", target);
-        exec("git", "commit", "-m", "Migrate %s to Antora syntax".formatted(target.getFileName()));
+    private void migrate(Path source, Path target) {
+        migrate(source, target, null);
+    }
+
+    private void migrate(Path source, Path target, Consumer<Document> consumer) {
+        try {
+            Files.createDirectories(target.getParent());
+            Files.copy(source, target);
+            exec("git", "add", target);
+            exec("git", "commit", "-m", "Move %s to Antora module".formatted(target.getFileName()));
+            if (consumer != null) {
+                var document = new Document(Files.readString(target));
+                consumer.accept(document);
+                Files.writeString(target, document.text);
+                exec("git", "add", target);
+                exec("git", "commit", "-m", "Migrate %s to Antora syntax".formatted(target.getFileName()));
+            }
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to migrate " + source, e);
+        }
     }
 
     private final Path projectDir;
