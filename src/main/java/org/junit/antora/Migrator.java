@@ -31,7 +31,7 @@ public class Migrator {
     }
 
     private final Path projectDir;
-    private final Path antoraModuleDir;
+    private final Path asciidocSrcDir;
     private final Path pagesDir;
     private final Path partialsDir;
     private final Path navFile;
@@ -39,9 +39,10 @@ public class Migrator {
     private int counter;
 
     public Migrator(Path projectDir) throws IOException {
-        this.projectDir = projectDir.toAbsolutePath();
+        this.projectDir = projectDir.toAbsolutePath().normalize();
 
-        antoraModuleDir = this.projectDir.resolve("documentation/modules/ROOT");
+        asciidocSrcDir = this.projectDir.resolve("documentation/src/docs/asciidoc");
+        var antoraModuleDir = this.projectDir.resolve("documentation/modules/ROOT");
         pagesDir = Files.createDirectories(antoraModuleDir.resolve("pages"));
         partialsDir = Files.createDirectories(antoraModuleDir.resolve("partials"));
         navFile = antoraModuleDir.resolve("nav.adoc");
@@ -51,8 +52,10 @@ public class Migrator {
 
         exec("git", "switch", "-c", "antora-migrator-tmp");
 
-        var asciidocSrcDir = projectDir.resolve("documentation/src/docs/asciidoc");
+        migrateReleaseNotes();
+    }
 
+    private void migrateReleaseNotes() throws Exception {
         var releaseNotesFile = pagesDir.resolve("release-notes.adoc");
 
         migrate(asciidocSrcDir.resolve("release-notes/index.adoc"), releaseNotesFile, doc -> {
@@ -67,8 +70,8 @@ public class Migrator {
 
         try (var listing = Files.list(asciidocSrcDir.resolve("release-notes"))) {
             var targetDir = Files.createDirectories(partialsDir.resolve("release-notes"));
-            listing.filter(it -> it.getFileName().toString().matches("release-notes-\\d.+\\.adoc"))
-                    .forEach(releaseNoteFile -> migrate(releaseNoteFile, targetDir.resolve(releaseNoteFile.getFileName())));
+            listing.filter(file -> file.getFileName().toString().matches("release-notes-\\d.+\\.adoc"))
+                    .forEach(file -> moveToAntora(file, targetDir.resolve(file.getFileName())));
         }
 
         addPageToNavFile(releaseNotesFile);
@@ -80,14 +83,9 @@ public class Migrator {
         gitCommitSingleFile(navFile, "Add %s to navigation".formatted(relativePath));
     }
 
-    private void migrate(Path source, Path target) {
-        migrate(source, target, null);
-    }
-
     private void migrate(Path source, Path target, Consumer<Document> consumer) {
         try {
-            exec("git", "mv", source, target);
-            gitCommitSingleFile(target, "Move %s to Antora module".formatted(target.getFileName()));
+            moveToAntora(source, target);
             if (consumer != null) {
                 var document = new Document(Files.readString(target));
                 consumer.accept(document);
@@ -96,6 +94,15 @@ public class Migrator {
             }
         } catch (Exception e) {
             throw new RuntimeException("Failed to migrate " + source, e);
+        }
+    }
+
+    private void moveToAntora(Path source, Path target) {
+        try {
+            exec("git", "mv", source, target);
+            gitCommitSingleFile(target, "Move %s to Antora module".formatted(target.getFileName()));
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to move " + source, e);
         }
     }
 
@@ -111,7 +118,7 @@ public class Migrator {
                 .command(commandStrings)
                 .directory(projectDir.toFile())
                 .redirectOutput(System.out)
-                .redirectError(System.err)
+                .redirectError(System.out)
                 .execute()
                 .getExitValue();
         System.out.println();
