@@ -86,8 +86,7 @@ public class Migrator {
 
     private void migrate(Path source, Path target, Consumer<Document> consumer) {
         try {
-            Files.createDirectories(target.getParent());
-            Files.copy(source, target);
+            exec("git", "mv", source, target);
             gitCommitSingleFile(target, "Move %s to Antora module".formatted(target.getFileName()));
             if (consumer != null) {
                 var document = new Document(Files.readString(target));
