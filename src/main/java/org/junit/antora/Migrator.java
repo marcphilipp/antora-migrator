@@ -58,6 +58,7 @@ public class Migrator {
         migrateLinkAttributes();
         removeUserGuideMainDocument();
         migrateOverview();
+        migrateApiEvolution();
         migrateReleaseNotes();
 
         // TODO fix all links
@@ -111,6 +112,18 @@ public class Migrator {
             doc.addAttribute("page-aliases", "index.adoc");
         });
         addPageToNavFile(overviewFile);
+    }
+
+    private void migrateApiEvolution() throws Exception {
+        var apiEvolutionFile = pagesDir.resolve("api-evolution.adoc");
+        migrate(asciidocSrcDir.resolve("user-guide/api-evolution.adoc"), apiEvolutionFile, doc -> {
+            doc.reduceHeadingLevel();
+            doc.removeTopLevelAnchor();
+            doc.addAttribute("page-toclevels", "1");
+            doc.replace("{experimentalApisTableFile}", "partial$experimental-apis-table.adoc");
+            doc.replace("{deprecatedApisTableFile}", "partial$deprecated-apis-table.adoc");
+        });
+        addPageToNavFile(apiEvolutionFile);
     }
 
     private void migrateReleaseNotes() throws Exception {
