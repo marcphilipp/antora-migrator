@@ -35,8 +35,11 @@ public class Migrator {
 
     private final Path projectDir;
     private final Path asciidocSrcDir;
+
+    private final Path imagesDir;
     private final Path pagesDir;
     private final Path partialsDir;
+
     private final Path navFile;
 
     private int counter;
@@ -46,6 +49,7 @@ public class Migrator {
 
         asciidocSrcDir = this.projectDir.resolve("documentation/src/docs/asciidoc");
         var antoraModuleDir = this.projectDir.resolve("documentation/modules/ROOT");
+        imagesDir = Files.createDirectories(antoraModuleDir.resolve("images"));
         pagesDir = Files.createDirectories(antoraModuleDir.resolve("pages"));
         partialsDir = Files.createDirectories(antoraModuleDir.resolve("partials"));
         navFile = antoraModuleDir.resolve("nav.adoc");
@@ -55,13 +59,28 @@ public class Migrator {
 
         exec("git", "switch", "-c", "antora-migrator-tmp");
 
+        moveImages();
+
         migrateLinkAttributes();
         removeUserGuideMainDocument();
         migrateOverview();
         migrateApiEvolution();
+        removeContributors();
         migrateReleaseNotes();
+        migrateAppendix();
 
         // TODO fix all links
+
+        deleteLeftoverAsciiDocResources();
+    }
+
+    private void moveImages() throws Exception {
+        var asciidocImagesDir = asciidocSrcDir.resolve("user-guide/images");
+        try (var listing = Files.list(asciidocImagesDir)) {
+            listing.forEach(file -> gitMv(file, imagesDir));
+        }
+        gitCommit("Move images to Antora module");
+        Files.delete(asciidocImagesDir);
     }
 
     private void migrateLinkAttributes() throws Exception {
@@ -100,7 +119,7 @@ public class Migrator {
         gitCommit("Migrate link attributes to antora.yml");
     }
 
-    private void removeUserGuideMainDocument() throws Exception {
+    private void removeUserGuideMainDocument() {
         gitRemoveSingleFile(asciidocSrcDir.resolve("user-guide/index.adoc"), "Asciidoctor User Guide main document");
     }
 
@@ -126,6 +145,10 @@ public class Migrator {
         addPageToNavFile(apiEvolutionFile);
     }
 
+    private void removeContributors() {
+        gitRemoveSingleFile(asciidocSrcDir.resolve("user-guide/contributors.adoc"), "Contributors link to GitHub");
+    }
+
     private void migrateReleaseNotes() throws Exception {
 
         var releaseNotesFile = pagesDir.resolve("release-notes.adoc");
@@ -143,11 +166,31 @@ public class Migrator {
         var releaseNotesPartialsDir = Files.createDirectories(partialsDir.resolve("release-notes"));
         try (var listing = Files.list(asciidocReleaseNotesDir)) {
             listing.filter(file -> file.getFileName().toString().matches("release-notes-\\d.+\\.adoc"))
-                    .forEach(file -> moveToAntora(file, releaseNotesPartialsDir.resolve(file.getFileName())));
+                    .forEach(file -> gitMv(file, releaseNotesPartialsDir.resolve(file.getFileName())));
         }
+        gitCommit("Move individual release note files to Antora module");
 
         migrate(asciidocReleaseNotesDir.resolve("release-notes-TEMPLATE.adoc"), releaseNotesPartialsDir.resolve("release-notes-TEMPLATE.adoc"), doc ->
                 doc.replace("'include:' this new file in index.adoc", "'include:' this new file in " + releaseNotesPartialsDir.relativize(releaseNotesFile)));
+
+        Files.delete(asciidocReleaseNotesDir);
+    }
+
+    private void migrateAppendix() throws Exception {
+        var appendixFile = pagesDir.resolve("appendix.adoc");
+        migrate(asciidocSrcDir.resolve("user-guide/appendix.adoc"), appendixFile, doc -> {
+            doc.reduceHeadingLevel();
+            doc.removeTopLevelAnchor();
+        });
+        addPageToNavFile(appendixFile);
+    }
+
+    private void deleteLeftoverAsciiDocResources() {
+        gitRmDir(asciidocSrcDir.resolve("docinfos"));
+        gitRmDir(asciidocSrcDir.resolve("resources"));
+        gitRmDir(asciidocSrcDir.resolve("tocbot-3.0.2"));
+        gitCommit("Remove obsolete Asciidoctor resources");
+        // TODO once all files are migrated Files.delete(asciidocSrcDir);
     }
 
     private void addPageToNavFile(Path page) throws Exception {
@@ -172,45 +215,58 @@ public class Migrator {
 
     private void moveToAntora(Path source, Path target) {
         try {
-            exec("git", "mv", source, target);
+            gitMv(source, target);
             gitCommitSingleFile(target, "Move %s to Antora module".formatted(target.getFileName()));
         } catch (Exception e) {
             throw new RuntimeException("Failed to move " + source, e);
         }
     }
 
-    private void gitCommitSingleFile(Path file, String message) throws Exception {
+    private void gitCommitSingleFile(Path file, String message) {
         gitAdd(file);
         gitCommit(message);
     }
 
-    private void gitRemoveSingleFile(Path file, String name) throws Exception {
+    private void gitRemoveSingleFile(Path file, String name) {
         gitRm(file);
         gitCommit("Remove " + name);
     }
 
-    private void gitAdd(Path file) throws Exception {
+    private void gitAdd(Path file) {
         exec("git", "add", file);
     }
 
-    private void gitRm(Path file) throws Exception {
+    private void gitMv(Path source, Path target) {
+        exec("git", "mv", source, target);
+    }
+
+    private void gitRm(Path file) {
         exec("git", "rm", file);
     }
 
-    private void gitCommit(String message) throws Exception {
+    private void gitRmDir(Path dir) {
+        exec("git", "rm", "-r", dir);
+    }
+
+    private void gitCommit(String message) {
         exec("git", "commit", "-m", message);
     }
 
-    private void exec(Object... command) throws Exception {
+    private void exec(Object... command) {
         var commandStrings = Arrays.stream(command).map(String::valueOf).toList();
         System.out.printf("[%d] Executing: %s%n", ++counter, String.join(" ", commandStrings));
-        var exitValue = new ProcessExecutor()
-                .command(commandStrings)
-                .directory(projectDir.toFile())
-                .redirectOutput(System.out)
-                .redirectError(System.out)
-                .execute()
-                .getExitValue();
+        int exitValue;
+        try {
+            exitValue = new ProcessExecutor()
+                    .command(commandStrings)
+                    .directory(projectDir.toFile())
+                    .redirectOutput(System.out)
+                    .redirectError(System.out)
+                    .execute()
+                    .getExitValue();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to run command: " + Arrays.toString(command), e);
+        }
         System.out.println();
         if (exitValue != 0) {
             throw new RuntimeException("Command failed with exit code %d: %s".formatted(exitValue, Arrays.toString(command)));
