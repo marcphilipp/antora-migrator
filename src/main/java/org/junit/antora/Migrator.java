@@ -70,6 +70,7 @@ public class Migrator {
         migrateOverview();
         migrateWritingTests();
         migrateMigratingFromJUnit4();
+        migrateRunningTests();
         migrateAdvancedTopics();
         migrateApiEvolution();
         removeContributors();
@@ -142,35 +143,7 @@ public class Migrator {
     }
 
     private void migrateWritingTests() throws Exception {
-        var mainSourceFile = asciidocSrcDir.resolve("user-guide/writing-tests.adoc");
-        var parts = Files.readString(mainSourceFile).splitWithDelimiters("\\[\\[.+]]\n=== ", -1);
-        var targetDir = Files.createDirectories(pagesDir.resolve("writing-tests"));
-        List<Document> docs = new ArrayList<>();
-        docs.add(new Document(targetDir.resolve("intro.adoc"), parts[0]));
-        var pattern = Pattern.compile("^\\[\\[.+]]\n=== (.+?)\n", Pattern.MULTILINE);
-        for (var i = 1; i < parts.length; i++) {
-            var text = parts[i] + parts[++i];
-            var matcher = pattern.matcher(text);
-            if (!matcher.find()) {
-                throw new IllegalArgumentException("Text did not start as expected");
-            }
-            var title = matcher.group(1);
-            var file = targetDir.resolve("%s.adoc".formatted(title.toLowerCase(Locale.ROOT).replace(' ', '-')));
-            docs.add(new Document(file, text));
-        }
-
-        for (var doc : docs) {
-            Files.copy(mainSourceFile, doc.file);
-            gitAdd(doc.file);
-        }
-        gitRm(mainSourceFile);
-        gitCommit("Move writing-tests.adoc to Antora module");
-
-        for (var doc : docs) {
-            doc.save();
-            gitAdd(doc.file);
-        }
-        gitCommit("Migrate writing-tests sections to Antora");
+        var docs = moveAndSplit(asciidocSrcDir.resolve("user-guide/writing-tests.adoc"), pagesDir.resolve("writing-tests"));
 
         var iterator = docs.iterator();
         migrateWritingTestsIntro(iterator.next());
@@ -190,10 +163,7 @@ public class Migrator {
         docs.forEach(doc -> gitAdd(doc.file));
         gitCommit("Migrate writing-tests sections to Antora syntax");
 
-        iterator = docs.iterator();
-        addPageToNavFile(iterator.next().file, 1);
-        iterator.forEachRemaining(doc -> addPageToNavFile(doc.file, 2));
-        gitCommitSingleFile(navFile, "Add writing-tests sections to navigation");
+        addAllToNavFile(docs, "Add writing-tests sections to navigation");
     }
 
     private void migrateWritingTestsIntro(Document doc) {
@@ -211,6 +181,73 @@ public class Migrator {
             doc.removeTopLevelAnchor();
         });
         addPageToNavFileAndCommit(targetFile, 1);
+    }
+
+    private void migrateRunningTests() throws Exception {
+        var docs = moveAndSplit(asciidocSrcDir.resolve("user-guide/running-tests.adoc"), pagesDir.resolve("running-tests"));
+
+        var iterator = docs.iterator();
+        migrateRunningTestsIntro(iterator.next());
+        iterator.forEachRemaining(doc -> {
+            doc.reduceHeadingLevel(2);
+            doc.replaceTestDirs();
+            doc.removeTopLevelAnchor();
+            doc.save();
+        });
+        docs.forEach(doc -> gitAdd(doc.file));
+        gitCommit("Migrate running-tests sections to Antora syntax");
+
+        addAllToNavFile(docs, "Add running-tests sections to navigation");
+    }
+
+    private void migrateRunningTestsIntro(Document doc) {
+        doc.reduceHeadingLevel(1);
+        doc.replaceTestDirs();
+        doc.removeTopLevelAnchor();
+        doc.append("""
+                
+                This chapter explains how to run tests from IDEs and build tools.
+                """);
+        doc.save();
+    }
+
+    private List<Document> moveAndSplit(Path mainSourceFile, Path targetDir) throws IOException {
+        var parts = Files.readString(mainSourceFile).splitWithDelimiters("\\[\\[.+]]\n=== ", -1);
+        Files.createDirectories(targetDir);
+        List<Document> docs = new ArrayList<>();
+        docs.add(new Document(targetDir.resolve("intro.adoc"), parts[0]));
+        var pattern = Pattern.compile("^\\[\\[.+]]\n=== (.+?)\n", Pattern.MULTILINE);
+        for (var i = 1; i < parts.length; i++) {
+            var text = parts[i] + parts[++i];
+            var matcher = pattern.matcher(text);
+            if (!matcher.find()) {
+                throw new IllegalArgumentException("Text did not start as expected");
+            }
+            var title = matcher.group(1);
+            var file = targetDir.resolve("%s.adoc".formatted(title.toLowerCase(Locale.ROOT).replace(' ', '-').replace('/', '-')));
+            docs.add(new Document(file, text));
+        }
+
+        for (var doc : docs) {
+            Files.copy(mainSourceFile, doc.file);
+            gitAdd(doc.file);
+        }
+        gitRm(mainSourceFile);
+        gitCommit("Move %s to Antora module".formatted(mainSourceFile.getFileName()));
+
+        for (var doc : docs) {
+            doc.save();
+            gitAdd(doc.file);
+        }
+        gitCommit("Migrate %s sections to Antora".formatted(mainSourceFile.getFileName()));
+        return docs;
+    }
+
+    private void addAllToNavFile(List<Document> docs, String message) {
+        var iterator2 = docs.iterator();
+        addPageToNavFile(iterator2.next().file, 1);
+        iterator2.forEachRemaining(doc -> addPageToNavFile(doc.file, 2));
+        gitCommitSingleFile(navFile, message);
     }
 
     private void migrateAdvancedTopics() throws Exception {
@@ -480,6 +517,20 @@ public class Migrator {
                     .toList());
         }
 
+        void append(String text) {
+            ensureEndsWithNewLine();
+            this.text += text;
+            ensureEndsWithNewLine();
+        }
+
+        void save() {
+            try {
+                Files.writeString(file, text);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+
         private void transformLines(UnaryOperator<List<String>> transformer) {
             List<String> lines = text.lines().collect(toCollection(ArrayList::new));
             lines = transformer.apply(lines);
@@ -502,14 +553,6 @@ public class Migrator {
             return "Document{" +
                     "file=" + file +
                     '}';
-        }
-
-        public void save() {
-            try {
-                Files.writeString(file, text);
-            } catch (IOException e) {
-                throw new UncheckedIOException(e);
-            }
         }
     }
 }
