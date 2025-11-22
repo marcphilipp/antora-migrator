@@ -65,6 +65,7 @@ public class Migrator {
         migrateLinkAttributes();
         removeUserGuideMainDocument();
         migrateOverview();
+        migrateMigratingFromJUnit4();
         migrateAdvancedTopics();
         migrateApiEvolution();
         removeContributors();
@@ -134,6 +135,16 @@ public class Migrator {
             doc.addAttribute("page-aliases", "index.adoc");
         });
         addPageToNavFile(overviewFile, 1);
+    }
+
+    private void migrateMigratingFromJUnit4() {
+        var targetFile = pagesDir.resolve("migrating-from-junit4.adoc");
+        migrate(asciidocSrcDir.resolve("user-guide/migration-from-junit4.adoc"), targetFile, doc -> {
+            doc.reduceHeadingLevel(1);
+            doc.replaceTestDirs();
+            doc.removeTopLevelAnchor();
+        });
+        addPageToNavFile(targetFile, 1);
     }
 
     private void migrateAdvancedTopics() throws Exception {
