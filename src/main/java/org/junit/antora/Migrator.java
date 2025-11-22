@@ -13,6 +13,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
+import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 
 import static java.nio.file.StandardOpenOption.APPEND;
@@ -52,12 +53,32 @@ public class Migrator {
 
         exec("git", "switch", "-c", "antora-migrator-tmp");
 
+        // TODO migrate link-attributes.adoc to antora.yml
+
+        removeUserGuideMainDocument();
+        migrateOverview();
         migrateReleaseNotes();
+
+        // TODO fix all links
+    }
+
+    private void removeUserGuideMainDocument() throws Exception {
+        gitRemoveSingleFile(asciidocSrcDir.resolve("user-guide/index.adoc"), "Asciidoctor User Guide main document");
+    }
+
+    private void migrateOverview() throws Exception {
+        var overviewFile = pagesDir.resolve("overview.adoc");
+        migrate(asciidocSrcDir.resolve("user-guide/overview.adoc"), overviewFile, doc -> {
+            doc.reduceHeadingLevel();
+            doc.removeTopLevelAnchor();
+            doc.addAttribute("page-aliases", "index.adoc");
+        });
+        addPageToNavFile(overviewFile);
     }
 
     private void migrateReleaseNotes() throws Exception {
-        var releaseNotesFile = pagesDir.resolve("release-notes.adoc");
 
+        var releaseNotesFile = pagesDir.resolve("release-notes.adoc");
         migrate(asciidocSrcDir.resolve("release-notes/index.adoc"), releaseNotesFile, doc -> {
             doc.removeTopLevelAnchor();
             doc.removeAuthors();
@@ -65,16 +86,18 @@ public class Migrator {
             doc.removeAttributes("docinfodir", "docinfo2", "numbered!", "last-update-label!");
             doc.changeAttribute("basedir", "partial$release-notes");
             doc.replace("include::{includedir}/link-attributes.adoc[]\n\n", "");
-//            doc.fixLinks();
         });
+        addPageToNavFile(releaseNotesFile);
 
-        try (var listing = Files.list(asciidocSrcDir.resolve("release-notes"))) {
-            var targetDir = Files.createDirectories(partialsDir.resolve("release-notes"));
+        var asciidocReleaseNotesDir = asciidocSrcDir.resolve("release-notes");
+        var releaseNotesPartialsDir = Files.createDirectories(partialsDir.resolve("release-notes"));
+        try (var listing = Files.list(asciidocReleaseNotesDir)) {
             listing.filter(file -> file.getFileName().toString().matches("release-notes-\\d.+\\.adoc"))
-                    .forEach(file -> moveToAntora(file, targetDir.resolve(file.getFileName())));
+                    .forEach(file -> moveToAntora(file, releaseNotesPartialsDir.resolve(file.getFileName())));
         }
 
-        addPageToNavFile(releaseNotesFile);
+        migrate(asciidocReleaseNotesDir.resolve("release-notes-TEMPLATE.adoc"), releaseNotesPartialsDir.resolve("release-notes-TEMPLATE.adoc"), doc ->
+                doc.replace("'include:' this new file in index.adoc", "'include:' this new file in " + releaseNotesPartialsDir.relativize(releaseNotesFile)));
     }
 
     private void addPageToNavFile(Path page) throws Exception {
@@ -108,6 +131,15 @@ public class Migrator {
 
     private void gitCommitSingleFile(Path file, String message) throws Exception {
         exec("git", "add", file);
+        gitCommit(message);
+    }
+
+    private void gitRemoveSingleFile(Path file, String name) throws Exception {
+        exec("git", "rm", file);
+        gitCommit("Remove " + name);
+    }
+
+    private void gitCommit(String message) throws Exception {
         exec("git", "commit", "-m", message);
     }
 
@@ -132,6 +164,8 @@ public class Migrator {
     }
 
     private static class Document {
+
+        private static final Pattern HEADING_PATTERN = Pattern.compile("^(=+)= ");
 
         String text;
 
@@ -173,14 +207,30 @@ public class Migrator {
                     .toList());
         }
 
+        void addAttribute(String attributeName, String value) {
+            transformLines(lines -> {
+                lines.add(1, toAttributeDefinition(attributeName) + " " + value);
+                return lines;
+            });
+        }
+
         void replace(String from, String to) {
             text = text.replace(from, to);
+        }
+
+        void reduceHeadingLevel() {
+            transformLines(lines -> lines.stream()
+                    .map(line -> HEADING_PATTERN.matcher(line).replaceFirst("$1 "))
+                    .toList());
         }
 
         private void transformLines(UnaryOperator<List<String>> transformer) {
             List<String> lines = text.lines().collect(toCollection(ArrayList::new));
             lines = transformer.apply(lines);
             text = String.join("\n", lines);
+            if (!text.endsWith("\n")) {
+                text += "\n";
+            }
         }
 
         private static String toAttributeDefinition(String attributeName) {
