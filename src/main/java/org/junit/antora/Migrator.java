@@ -6,6 +6,7 @@ package org.junit.antora;
 import org.zeroturnaround.exec.ProcessExecutor;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -64,6 +65,7 @@ public class Migrator {
         migrateLinkAttributes();
         removeUserGuideMainDocument();
         migrateOverview();
+        migrateAdvancedTopics();
         migrateApiEvolution();
         removeContributors();
         migrateReleaseNotes();
@@ -123,26 +125,68 @@ public class Migrator {
         gitRemoveSingleFile(asciidocSrcDir.resolve("user-guide/index.adoc"), "Asciidoctor User Guide main document");
     }
 
-    private void migrateOverview() throws Exception {
+    private void migrateOverview() {
         var overviewFile = pagesDir.resolve("overview.adoc");
         migrate(asciidocSrcDir.resolve("user-guide/overview.adoc"), overviewFile, doc -> {
-            doc.reduceHeadingLevel();
+            doc.reduceHeadingLevel(1);
+            doc.replaceTestDirs();
             doc.removeTopLevelAnchor();
             doc.addAttribute("page-aliases", "index.adoc");
         });
-        addPageToNavFile(overviewFile);
+        addPageToNavFile(overviewFile, 1);
     }
 
-    private void migrateApiEvolution() throws Exception {
+    private void migrateAdvancedTopics() throws Exception {
+        var advancedTopicsTargetDir = Files.createDirectories(pagesDir.resolve("advanced-topics"));
+        var introFile = advancedTopicsTargetDir.resolve("intro.adoc");
+        List<Path> sections = new ArrayList<>();
+        var userGuideDir = asciidocSrcDir.resolve("user-guide");
+        migrate(userGuideDir.resolve("advanced-topics.adoc"), introFile, doc -> {
+            doc.reduceHeadingLevel(1);
+            doc.replaceTestDirs();
+            doc.removeTopLevelAnchor();
+            doc.transformLines(lines -> {
+                lines.add(2, """
+                        This section goes into detail on topics that are not strictly necessary to understand in order to write and run JUnit tests.
+                        
+                        """
+                );
+                return lines;
+            });
+            var pattern = Pattern.compile("\ninclude::(advanced-topics/.+\\.adoc)\\[]");
+            var matcher = pattern.matcher(doc.text);
+            while (matcher.find()) {
+                doc.text = matcher.replaceFirst("* xref:$1[]");
+                sections.add(userGuideDir.resolve(matcher.group(1)));
+                matcher = pattern.matcher(doc.text);
+            }
+        });
+        addPageToNavFile(introFile, 1);
+
+        sections.forEach(file -> {
+            var targetFile = advancedTopicsTargetDir.resolve(file.getFileName());
+            migrate(file, targetFile, doc -> {
+                doc.reduceHeadingLevel(2);
+                doc.replaceTestDirs();
+                doc.removeTopLevelAnchor();
+            });
+            addPageToNavFile(targetFile, 2);
+        });
+
+        Files.delete(userGuideDir.resolve("advanced-topics"));
+    }
+
+    private void migrateApiEvolution() {
         var apiEvolutionFile = pagesDir.resolve("api-evolution.adoc");
         migrate(asciidocSrcDir.resolve("user-guide/api-evolution.adoc"), apiEvolutionFile, doc -> {
-            doc.reduceHeadingLevel();
+            doc.reduceHeadingLevel(1);
+            doc.replaceTestDirs();
             doc.removeTopLevelAnchor();
             doc.addAttribute("page-toclevels", "1");
             doc.replace("{experimentalApisTableFile}", "partial$experimental-apis-table.adoc");
             doc.replace("{deprecatedApisTableFile}", "partial$deprecated-apis-table.adoc");
         });
-        addPageToNavFile(apiEvolutionFile);
+        addPageToNavFile(apiEvolutionFile, 1);
     }
 
     private void removeContributors() {
@@ -153,6 +197,7 @@ public class Migrator {
 
         var releaseNotesFile = pagesDir.resolve("release-notes.adoc");
         migrate(asciidocSrcDir.resolve("release-notes/index.adoc"), releaseNotesFile, doc -> {
+            doc.replaceTestDirs();
             doc.removeTopLevelAnchor();
             doc.removeAuthors();
             doc.changeTitle("Release Notes");
@@ -160,7 +205,7 @@ public class Migrator {
             doc.changeAttribute("basedir", "partial$release-notes");
             doc.replace("include::{includedir}/link-attributes.adoc[]\n\n", "");
         });
-        addPageToNavFile(releaseNotesFile);
+        addPageToNavFile(releaseNotesFile, 1);
 
         var asciidocReleaseNotesDir = asciidocSrcDir.resolve("release-notes");
         var releaseNotesPartialsDir = Files.createDirectories(partialsDir.resolve("release-notes"));
@@ -176,13 +221,14 @@ public class Migrator {
         Files.delete(asciidocReleaseNotesDir);
     }
 
-    private void migrateAppendix() throws Exception {
+    private void migrateAppendix() {
         var appendixFile = pagesDir.resolve("appendix.adoc");
         migrate(asciidocSrcDir.resolve("user-guide/appendix.adoc"), appendixFile, doc -> {
-            doc.reduceHeadingLevel();
+            doc.reduceHeadingLevel(1);
+            doc.replaceTestDirs();
             doc.removeTopLevelAnchor();
         });
-        addPageToNavFile(appendixFile);
+        addPageToNavFile(appendixFile, 1);
     }
 
     private void deleteLeftoverAsciiDocResources() {
@@ -193,9 +239,13 @@ public class Migrator {
         // TODO once all files are migrated Files.delete(asciidocSrcDir);
     }
 
-    private void addPageToNavFile(Path page) throws Exception {
+    private void addPageToNavFile(Path page, int level) {
         var relativePath = pagesDir.relativize(page);
-        Files.write(navFile, List.of("%s xref:%s[]".formatted(repeat(relativePath.getNameCount(), "*"), relativePath)), APPEND);
+        try {
+            Files.write(navFile, List.of("%s xref:%s[]".formatted(repeat(level, "*"), relativePath)), APPEND);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
         gitCommitSingleFile(navFile, "Add %s to navigation".formatted(relativePath));
     }
 
@@ -274,12 +324,10 @@ public class Migrator {
     }
 
     private static String repeat(int times, String value) {
-        return IntStream.range(0, times).mapToObj(__ -> value).collect(joining());
+        return IntStream.range(0, times).mapToObj(_ -> value).collect(joining());
     }
 
     private static class Document {
-
-        private static final Pattern HEADING_PATTERN = Pattern.compile("^(=+)= ");
 
         String text;
 
@@ -296,6 +344,15 @@ public class Migrator {
                 lines.remove(1);
                 return lines;
             });
+        }
+
+        void replaceTestDirs() {
+            removeAttributes("testDir", "testResourcesDir", "kotlinTestDir");
+            text = text.trim();
+            ensureEndsWithNewLine();
+            replace("{testDir}", "example$java");
+            replace("{testResourcesDir}", "example$java");
+            replace("{kotlinTestDir}", "example$kotlin");
         }
 
         void changeTitle(String title) {
@@ -332,9 +389,10 @@ public class Migrator {
             text = text.replace(from, to);
         }
 
-        void reduceHeadingLevel() {
+        void reduceHeadingLevel(int levels) {
+            Pattern pattern = Pattern.compile("^(=+)={%d} ".formatted(levels));
             transformLines(lines -> lines.stream()
-                    .map(line -> HEADING_PATTERN.matcher(line).replaceFirst("$1 "))
+                    .map(line -> pattern.matcher(line).replaceFirst("$1 "))
                     .toList());
         }
 
@@ -342,6 +400,10 @@ public class Migrator {
             List<String> lines = text.lines().collect(toCollection(ArrayList::new));
             lines = transformer.apply(lines);
             text = String.join("\n", lines);
+            ensureEndsWithNewLine();
+        }
+
+        private void ensureEndsWithNewLine() {
             if (!text.endsWith("\n")) {
                 text += "\n";
             }
