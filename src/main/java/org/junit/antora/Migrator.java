@@ -71,6 +71,7 @@ public class Migrator {
         migrateWritingTests();
         migrateMigratingFromJUnit4();
         migrateRunningTests();
+        migrateExtensions();
         migrateAdvancedTopics();
         migrateApiEvolution();
         removeContributors();
@@ -211,7 +212,49 @@ public class Migrator {
         doc.save();
     }
 
-    private List<Document> moveAndSplit(Path mainSourceFile, Path targetDir) throws IOException {
+    private void migrateExtensions() throws Exception {
+        var mainSourceFile = asciidocSrcDir.resolve("user-guide/extensions.adoc");
+        var docs = split(mainSourceFile, pagesDir.resolve("extensions"));
+        docs.removeFirst();
+        moveAndApplySplit(mainSourceFile, docs);
+
+        docs.forEach(doc -> {
+            doc.reduceHeadingLevel(2);
+            doc.replaceTestDirs();
+            doc.removeTopLevelAnchor();
+            if ("overview.adoc".equals(doc.file.getFileName().toString())) {
+                doc.changeTitle("Extensions");
+            }
+            doc.save();
+        });
+        docs.forEach(doc -> gitAdd(doc.file));
+        gitCommit("Migrate extensions sections to Antora syntax");
+
+        addAllToNavFile(docs, "Add extensions sections to navigation");
+    }
+
+    private List<Document> moveAndSplit(Path mainSourceFile, Path targetDir) throws Exception {
+        var docs = split(mainSourceFile, targetDir);
+        moveAndApplySplit(mainSourceFile, docs);
+        return docs;
+    }
+
+    private void moveAndApplySplit(Path mainSourceFile, List<Document> docs) throws Exception {
+        for (var doc : docs) {
+            Files.copy(mainSourceFile, doc.file);
+            gitAdd(doc.file);
+        }
+        gitRm(mainSourceFile);
+        gitCommit("Move %s to Antora module".formatted(mainSourceFile.getFileName()));
+
+        for (var doc : docs) {
+            doc.save();
+            gitAdd(doc.file);
+        }
+        gitCommit("Migrate %s sections to Antora".formatted(mainSourceFile.getFileName()));
+    }
+
+    private static List<Document> split(Path mainSourceFile, Path targetDir) throws Exception {
         var parts = Files.readString(mainSourceFile).splitWithDelimiters("\\[\\[.+]]\n=== ", -1);
         Files.createDirectories(targetDir);
         List<Document> docs = new ArrayList<>();
@@ -227,19 +270,6 @@ public class Migrator {
             var file = targetDir.resolve("%s.adoc".formatted(title.toLowerCase(Locale.ROOT).replace(' ', '-').replace('/', '-')));
             docs.add(new Document(file, text));
         }
-
-        for (var doc : docs) {
-            Files.copy(mainSourceFile, doc.file);
-            gitAdd(doc.file);
-        }
-        gitRm(mainSourceFile);
-        gitCommit("Move %s to Antora module".formatted(mainSourceFile.getFileName()));
-
-        for (var doc : docs) {
-            doc.save();
-            gitAdd(doc.file);
-        }
-        gitCommit("Migrate %s sections to Antora".formatted(mainSourceFile.getFileName()));
         return docs;
     }
 
@@ -345,12 +375,14 @@ public class Migrator {
         addPageToNavFileAndCommit(appendixFile, 1);
     }
 
-    private void deleteLeftoverAsciiDocResources() {
+    private void deleteLeftoverAsciiDocResources() throws Exception {
         gitRmDir(asciidocSrcDir.resolve("docinfos"));
         gitRmDir(asciidocSrcDir.resolve("resources"));
         gitRmDir(asciidocSrcDir.resolve("tocbot-3.0.2"));
         gitCommit("Remove obsolete Asciidoctor resources");
-        // TODO once all files are migrated Files.delete(asciidocSrcDir);
+        Files.delete(asciidocSrcDir.resolve("user-guide"));
+        Files.delete(asciidocSrcDir);
+        Files.delete(asciidocSrcDir.getParent());
     }
 
     private void addPageToNavFileAndCommit(Path page, int level) {
