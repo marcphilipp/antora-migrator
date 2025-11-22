@@ -11,10 +11,12 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import static java.nio.file.StandardOpenOption.APPEND;
 import static java.util.stream.Collectors.joining;
@@ -53,13 +55,48 @@ public class Migrator {
 
         exec("git", "switch", "-c", "antora-migrator-tmp");
 
-        // TODO migrate link-attributes.adoc to antora.yml
-
+        migrateLinkAttributes();
         removeUserGuideMainDocument();
         migrateOverview();
         migrateReleaseNotes();
 
         // TODO fix all links
+    }
+
+    private void migrateLinkAttributes() throws Exception {
+        var linkAttributesFile = asciidocSrcDir.resolve("link-attributes.adoc");
+        var antoraYml = projectDir.resolve("documentation/antora.yml");
+        try (var lines = Files.lines(linkAttributesFile)) {
+            var commentPattern = Pattern.compile("// (.+)$");
+            var attributePattern = Pattern.compile("^:(.+):\\s+(.+)$");
+            var existingLines = lines
+                    .map(line -> {
+                        var m = attributePattern.matcher(line);
+                        if (m.matches()) {
+                            var attributeName = m.group(1);
+                            if (attributeName.equals("javadoc-root")) {
+                                return null;
+                            }
+                            return attributeName + ": \"" + m.group(2).replace("\\", "\\\\") + "\"";
+                        }
+                        m = commentPattern.matcher(line);
+                        if (m.matches()) {
+                            return "# " + m.group(1);
+                        }
+                        return null;
+                    })
+                    .filter(Objects::nonNull);
+            var attributeLines = Stream.concat(Stream.of("javadoc-root: \"xref:attachment$api/\""), existingLines)
+                    .map(line -> "    " + line)
+                    .collect(joining("\n"));
+            Files.writeString(antoraYml, """
+                    asciidoc:
+                      attributes:
+                    """ + attributeLines + "\n", APPEND);
+        }
+        gitRm(linkAttributesFile);
+        gitAdd(antoraYml);
+        gitCommit("Migrate link attributes to antora.yml");
     }
 
     private void removeUserGuideMainDocument() throws Exception {
@@ -130,13 +167,21 @@ public class Migrator {
     }
 
     private void gitCommitSingleFile(Path file, String message) throws Exception {
-        exec("git", "add", file);
+        gitAdd(file);
         gitCommit(message);
     }
 
     private void gitRemoveSingleFile(Path file, String name) throws Exception {
-        exec("git", "rm", file);
+        gitRm(file);
         gitCommit("Remove " + name);
+    }
+
+    private void gitAdd(Path file) throws Exception {
+        exec("git", "add", file);
+    }
+
+    private void gitRm(Path file) throws Exception {
+        exec("git", "rm", file);
     }
 
     private void gitCommit(String message) throws Exception {
