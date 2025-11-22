@@ -12,6 +12,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
@@ -20,6 +21,7 @@ import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static java.nio.file.StandardOpenOption.APPEND;
+import static java.util.function.Predicate.isEqual;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toCollection;
 
@@ -58,6 +60,7 @@ public class Migrator {
 
     private void run() throws Exception {
 
+        // TODO remove this
         exec("git", "switch", "-c", "antora-migrator-tmp");
 
         moveImages();
@@ -65,6 +68,7 @@ public class Migrator {
         migrateLinkAttributes();
         removeUserGuideMainDocument();
         migrateOverview();
+        migrateWritingTests();
         migrateMigratingFromJUnit4();
         migrateAdvancedTopics();
         migrateApiEvolution();
@@ -134,7 +138,69 @@ public class Migrator {
             doc.removeTopLevelAnchor();
             doc.addAttribute("page-aliases", "index.adoc");
         });
-        addPageToNavFile(overviewFile, 1);
+        addPageToNavFileAndCommit(overviewFile, 1);
+    }
+
+    private void migrateWritingTests() throws Exception {
+        var mainSourceFile = asciidocSrcDir.resolve("user-guide/writing-tests.adoc");
+        var parts = Files.readString(mainSourceFile).splitWithDelimiters("\\[\\[.+]]\n=== ", -1);
+        var targetDir = Files.createDirectories(pagesDir.resolve("writing-tests"));
+        List<Document> docs = new ArrayList<>();
+        docs.add(new Document(targetDir.resolve("intro.adoc"), parts[0]));
+        var pattern = Pattern.compile("^\\[\\[.+]]\n=== (.+?)\n", Pattern.MULTILINE);
+        for (var i = 1; i < parts.length; i++) {
+            var text = parts[i] + parts[++i];
+            var matcher = pattern.matcher(text);
+            if (!matcher.find()) {
+                throw new IllegalArgumentException("Text did not start as expected");
+            }
+            var title = matcher.group(1);
+            var file = targetDir.resolve("%s.adoc".formatted(title.toLowerCase(Locale.ROOT).replace(' ', '-')));
+            docs.add(new Document(file, text));
+        }
+
+        for (var doc : docs) {
+            Files.copy(mainSourceFile, doc.file);
+            gitAdd(doc.file);
+        }
+        gitRm(mainSourceFile);
+        gitCommit("Move writing-tests.adoc to Antora module");
+
+        for (var doc : docs) {
+            doc.save();
+            gitAdd(doc.file);
+        }
+        gitCommit("Migrate writing-tests sections to Antora");
+
+        var iterator = docs.iterator();
+        migrateWritingTestsIntro(iterator.next());
+        iterator.forEachRemaining(doc -> {
+            doc.reduceHeadingLevel(2);
+            doc.replaceTestDirs();
+            doc.removeTopLevelAnchor();
+            if ("definitions.adoc".equals(doc.file.getFileName().toString())) {
+                doc.text = doc.text.replaceAll("\n\\.(.+)\n\\*{4}", "\n== $1\n");
+                doc.transformLines(lines -> {
+                    lines.removeIf(isEqual("****"));
+                    return lines;
+                });
+            }
+            doc.save();
+        });
+        docs.forEach(doc -> gitAdd(doc.file));
+        gitCommit("Migrate writing-tests sections to Antora syntax");
+
+        iterator = docs.iterator();
+        addPageToNavFile(iterator.next().file, 1);
+        iterator.forEachRemaining(doc -> addPageToNavFile(doc.file, 2));
+        gitCommitSingleFile(navFile, "Add writing-tests sections to navigation");
+    }
+
+    private void migrateWritingTestsIntro(Document doc) {
+        doc.reduceHeadingLevel(1);
+        doc.replaceTestDirs();
+        doc.removeTopLevelAnchor();
+        doc.save();
     }
 
     private void migrateMigratingFromJUnit4() {
@@ -144,7 +210,7 @@ public class Migrator {
             doc.replaceTestDirs();
             doc.removeTopLevelAnchor();
         });
-        addPageToNavFile(targetFile, 1);
+        addPageToNavFileAndCommit(targetFile, 1);
     }
 
     private void migrateAdvancedTopics() throws Exception {
@@ -172,7 +238,7 @@ public class Migrator {
                 matcher = pattern.matcher(doc.text);
             }
         });
-        addPageToNavFile(introFile, 1);
+        addPageToNavFileAndCommit(introFile, 1);
 
         sections.forEach(file -> {
             var targetFile = advancedTopicsTargetDir.resolve(file.getFileName());
@@ -181,7 +247,7 @@ public class Migrator {
                 doc.replaceTestDirs();
                 doc.removeTopLevelAnchor();
             });
-            addPageToNavFile(targetFile, 2);
+            addPageToNavFileAndCommit(targetFile, 2);
         });
 
         Files.delete(userGuideDir.resolve("advanced-topics"));
@@ -197,7 +263,7 @@ public class Migrator {
             doc.replace("{experimentalApisTableFile}", "partial$experimental-apis-table.adoc");
             doc.replace("{deprecatedApisTableFile}", "partial$deprecated-apis-table.adoc");
         });
-        addPageToNavFile(apiEvolutionFile, 1);
+        addPageToNavFileAndCommit(apiEvolutionFile, 1);
     }
 
     private void removeContributors() {
@@ -216,7 +282,7 @@ public class Migrator {
             doc.changeAttribute("basedir", "partial$release-notes");
             doc.replace("include::{includedir}/link-attributes.adoc[]\n\n", "");
         });
-        addPageToNavFile(releaseNotesFile, 1);
+        addPageToNavFileAndCommit(releaseNotesFile, 1);
 
         var asciidocReleaseNotesDir = asciidocSrcDir.resolve("release-notes");
         var releaseNotesPartialsDir = Files.createDirectories(partialsDir.resolve("release-notes"));
@@ -239,7 +305,7 @@ public class Migrator {
             doc.replaceTestDirs();
             doc.removeTopLevelAnchor();
         });
-        addPageToNavFile(appendixFile, 1);
+        addPageToNavFileAndCommit(appendixFile, 1);
     }
 
     private void deleteLeftoverAsciiDocResources() {
@@ -250,23 +316,28 @@ public class Migrator {
         // TODO once all files are migrated Files.delete(asciidocSrcDir);
     }
 
-    private void addPageToNavFile(Path page, int level) {
+    private void addPageToNavFileAndCommit(Path page, int level) {
+        var relativePath = addPageToNavFile(page, level);
+        gitCommitSingleFile(navFile, "Add %s to navigation".formatted(relativePath));
+    }
+
+    private Path addPageToNavFile(Path page, int level) {
         var relativePath = pagesDir.relativize(page);
         try {
             Files.write(navFile, List.of("%s xref:%s[]".formatted(repeat(level, "*"), relativePath)), APPEND);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-        gitCommitSingleFile(navFile, "Add %s to navigation".formatted(relativePath));
+        return relativePath;
     }
 
     private void migrate(Path source, Path target, Consumer<Document> consumer) {
         try {
             moveToAntora(source, target);
             if (consumer != null) {
-                var document = new Document(Files.readString(target));
+                var document = new Document(target, Files.readString(target));
                 consumer.accept(document);
-                Files.writeString(target, document.text);
+                document.save();
                 gitCommitSingleFile(target, "Migrate %s to Antora syntax".formatted(target.getFileName()));
             }
         } catch (Exception e) {
@@ -340,9 +411,11 @@ public class Migrator {
 
     private static class Document {
 
+        final Path file;
         String text;
 
-        Document(String text) {
+        Document(Path file, String text) {
+            this.file = file;
             this.text = text;
         }
 
@@ -422,6 +495,21 @@ public class Migrator {
 
         private static String toAttributeDefinition(String attributeName) {
             return ":%s:".formatted(attributeName);
+        }
+
+        @Override
+        public String toString() {
+            return "Document{" +
+                    "file=" + file +
+                    '}';
+        }
+
+        public void save() {
+            try {
+                Files.writeString(file, text);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
         }
     }
 }
