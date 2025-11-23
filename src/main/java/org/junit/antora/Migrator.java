@@ -144,7 +144,7 @@ public class Migrator {
             doc.removeTopLevelAnchor();
             doc.addAttribute("page-aliases", "index.adoc");
         });
-        addPageToNavFileAndCommit(overviewFile, 1);
+        addPageToNavFileAndCommit(overviewFile);
     }
 
     private void migrateWritingTests() throws Exception {
@@ -185,7 +185,7 @@ public class Migrator {
             doc.replaceTestDirs();
             doc.removeTopLevelAnchor();
         });
-        addPageToNavFileAndCommit(targetFile, 1);
+        addPageToNavFileAndCommit(targetFile);
     }
 
     private void migrateRunningTests() throws Exception {
@@ -211,7 +211,7 @@ public class Migrator {
         doc.removeTopLevelAnchor();
         doc.append("""
                 
-                This chapter explains how to run tests from IDEs and build tools.
+                This section explains how to run tests from IDEs and build tools.
                 """);
         doc.save();
     }
@@ -287,30 +287,17 @@ public class Migrator {
 
     private void migrateAdvancedTopics() throws Exception {
         var advancedTopicsTargetDir = Files.createDirectories(pagesDir.resolve("advanced-topics"));
-        var introFile = advancedTopicsTargetDir.resolve("intro.adoc");
-        List<Path> sections = new ArrayList<>();
         var userGuideDir = asciidocSrcDir.resolve("user-guide");
-        migrate(userGuideDir.resolve("advanced-topics.adoc"), introFile, doc -> {
-            doc.reduceHeadingLevel(1);
-            doc.replaceTestDirs();
-            doc.removeTopLevelAnchor();
-            doc.transformLines(lines -> {
-                lines.add(2, """
-                        This section goes into detail on topics that are not strictly necessary to understand in order to write and run JUnit tests.
-                        
-                        """
-                );
-                return lines;
-            });
-            var pattern = Pattern.compile("\ninclude::(advanced-topics/.+\\.adoc)\\[]");
-            var matcher = pattern.matcher(doc.text);
-            while (matcher.find()) {
-                doc.text = matcher.replaceFirst("* xref:$1[]");
-                sections.add(userGuideDir.resolve(matcher.group(1)));
-                matcher = pattern.matcher(doc.text);
-            }
-        });
-        addPageToNavFileAndCommit(introFile, 1);
+
+        List<Path> sections = new ArrayList<>();
+        var indexDoc = new Document(userGuideDir.resolve("advanced-topics.adoc"));
+        var pattern = Pattern.compile("\ninclude::(advanced-topics/.+\\.adoc)\\[]");
+        var matcher = pattern.matcher(indexDoc.text);
+        while (matcher.find()) {
+            sections.add(userGuideDir.resolve(matcher.group(1)));
+        }
+        gitRemoveSingleFile(indexDoc.file, "Advanced Topics include file");
+        addItemToNavFile("Advanced Topics", 1);
 
         sections.forEach(file -> {
             var targetFile = advancedTopicsTargetDir.resolve(file.getFileName());
@@ -319,8 +306,9 @@ public class Migrator {
                 doc.replaceTestDirs();
                 doc.removeTopLevelAnchor();
             });
-            addPageToNavFileAndCommit(targetFile, 2);
+            addPageToNavFile(targetFile, 2);
         });
+        gitCommitSingleFile(navFile, "Add advanced topics to navigation");
 
         Files.delete(userGuideDir.resolve("advanced-topics"));
     }
@@ -335,7 +323,7 @@ public class Migrator {
             doc.replace("{experimentalApisTableFile}", "partial$experimental-apis-table.adoc");
             doc.replace("{deprecatedApisTableFile}", "partial$deprecated-apis-table.adoc");
         });
-        addPageToNavFileAndCommit(apiEvolutionFile, 1);
+        addPageToNavFileAndCommit(apiEvolutionFile);
     }
 
     private void removeContributors() {
@@ -350,11 +338,11 @@ public class Migrator {
             doc.removeTopLevelAnchor();
             doc.removeAuthors();
             doc.changeTitle("Release Notes");
-            doc.removeAttributes("docinfodir", "docinfo2", "numbered!", "last-update-label!");
-            doc.changeAttribute("basedir", "partial$release-notes");
+            doc.removeAttributes("docinfodir", "docinfo2", "numbered!", "last-update-label!", "basedir");
+            doc.replace("{basedir}", "partial$release-notes");
             doc.replace("include::{includedir}/link-attributes.adoc[]\n\n", "");
         });
-        addPageToNavFileAndCommit(releaseNotesFile, 1);
+        addPageToNavFileAndCommit(releaseNotesFile);
 
         var asciidocReleaseNotesDir = asciidocSrcDir.resolve("release-notes");
         var releaseNotesPartialsDir = Files.createDirectories(partialsDir.resolve("release-notes"));
@@ -377,7 +365,7 @@ public class Migrator {
             doc.replaceTestDirs();
             doc.removeTopLevelAnchor();
         });
-        addPageToNavFileAndCommit(appendixFile, 1);
+        addPageToNavFileAndCommit(appendixFile);
     }
 
     private void fixAllLinks() throws Exception {
@@ -410,19 +398,24 @@ public class Migrator {
         Files.delete(asciidocSrcDir.getParent());
     }
 
-    private void addPageToNavFileAndCommit(Path page, int level) {
-        var relativePath = addPageToNavFile(page, level);
+    private void addPageToNavFileAndCommit(Path page) {
+        var relativePath = addPageToNavFile(page, 1);
         gitCommitSingleFile(navFile, "Add %s to navigation".formatted(relativePath));
     }
 
     private Path addPageToNavFile(Path page, int level) {
         var relativePath = pagesDir.relativize(page);
+        addItemToNavFile("xref:%s[]".formatted(relativePath), level);
+        return relativePath;
+    }
+
+    private void addItemToNavFile(String item, int level) {
         try {
-            Files.write(navFile, List.of("%s xref:%s[]".formatted(repeat(level, "*"), relativePath)), APPEND);
+            var asterisks = IntStream.range(0, level).mapToObj(_ -> "*").collect(joining());
+            Files.write(navFile, List.of("%s %s".formatted(asterisks, item)), APPEND);
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
-        return relativePath;
     }
 
     private void migrate(Path source, Path target, Consumer<Document> consumer) {
@@ -499,10 +492,6 @@ public class Migrator {
         }
     }
 
-    private static String repeat(int times, String value) {
-        return IntStream.range(0, times).mapToObj(_ -> value).collect(joining());
-    }
-
     private class Document {
 
         final Path file;
@@ -558,18 +547,6 @@ public class Migrator {
                     .toList());
         }
 
-        void changeAttribute(String attributeName, String value) {
-            var attributeDefinition = toAttributeDefinition(attributeName);
-            transformLines(lines -> lines.stream()
-                    .map(line -> {
-                        if (line.startsWith(attributeDefinition)) {
-                            return attributeDefinition + " " + value;
-                        }
-                        return line;
-                    })
-                    .toList());
-        }
-
         void addAttribute(String attributeName, String value) {
             transformLines(lines -> {
                 lines.add(1, toAttributeDefinition(attributeName) + " " + value);
@@ -588,6 +565,7 @@ public class Migrator {
                     .toList());
         }
 
+        @SuppressWarnings("SameParameterValue")
         void append(String text) {
             ensureEndsWithNewLine();
             this.text += text;
