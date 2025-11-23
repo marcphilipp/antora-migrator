@@ -82,7 +82,7 @@ public class Migrator {
         migrateReleaseNotes();
         migrateAppendix();
 
-        fixAllLinks();
+        fixAllLinksAndIncludes();
         deleteLeftoverAsciiDocResources();
     }
 
@@ -109,7 +109,7 @@ public class Migrator {
                             if (attributeName.equals("javadoc-root")) {
                                 return null;
                             }
-                            return attributeName + ": \"" + m.group(2).replace("\\", "\\\\") + "\"";
+                            return "%s: '%s'".formatted(attributeName, m.group(2));
                         }
                         m = commentPattern.matcher(line);
                         if (m.matches()) {
@@ -320,8 +320,6 @@ public class Migrator {
             doc.replaceTestDirs();
             doc.removeTopLevelAnchor();
             doc.addAttribute("page-toclevels", "1");
-            doc.replace("{experimentalApisTableFile}", "partial$experimental-apis-table.adoc");
-            doc.replace("{deprecatedApisTableFile}", "partial$deprecated-apis-table.adoc");
         });
         addPageToNavFileAndCommit(apiEvolutionFile);
     }
@@ -368,23 +366,31 @@ public class Migrator {
         addPageToNavFileAndCommit(appendixFile);
     }
 
-    private void fixAllLinks() throws Exception {
-        var documents = loadAllDocuments();
+    private void fixAllLinksAndIncludes() throws Exception {
+        var documents = loadAllDocuments(pagesDir);
         documents.forEach(Document::collectAnchors);
+        documents.addAll(loadAllDocuments(partialsDir));
         documents.forEach(Document::replaceLinks);
         documents.forEach(doc -> {
+            doc.replace("{experimentalApisTableFile}", "partial$experimental-apis-table.adoc");
+            doc.replace("{deprecatedApisTableFile}", "partial$deprecated-apis-table.adoc");
+            doc.replace("{standaloneConsoleLauncherShadowedArtifactsFile}", "partial$console-launcher-standalone-shadowed-artifacts.adoc");
+            doc.replace("{consoleLauncherOptionsFile}", "partial$console-launcher-options.txt");
+            doc.replace("{consoleLauncherDiscoverOptionsFile}", "partial$console-launcher-discover-options.txt");
+            doc.replace("{consoleLauncherExecuteOptionsFile}", "partial$console-launcher-execute-options.txt");
+            doc.replace("{consoleLauncherEnginesOptionsFile}", "partial$console-launcher-engines-options.txt");
             doc.save();
             gitAdd(doc.file);
         });
         gitCommit("Fix links");
     }
 
-    private List<Document> loadAllDocuments() throws Exception {
-        var pathMatcher = pagesDir.getFileSystem().getPathMatcher("glob:**/*.adoc");
-        try (var listing = Files.walk(pagesDir)) {
+    private List<Document> loadAllDocuments(Path dir) throws Exception {
+        var pathMatcher = dir.getFileSystem().getPathMatcher("glob:**/*.adoc");
+        try (var listing = Files.walk(dir)) {
             return listing.filter(pathMatcher::matches)
                     .map(Document::new)
-                    .toList();
+                    .collect(toCollection(ArrayList::new));
         }
     }
 
@@ -532,7 +538,7 @@ public class Migrator {
             text = text.trim();
             ensureEndsWithNewLine();
             replace("{testDir}", "example$java");
-            replace("{testResourcesDir}", "example$java");
+            replace("{testResourcesDir}", "example$resources");
             replace("{kotlinTestDir}", "example$kotlin");
         }
 
