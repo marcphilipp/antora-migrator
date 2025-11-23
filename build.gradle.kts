@@ -8,6 +8,7 @@ repositories {
 
 dependencies {
     implementation("org.zeroturnaround:zt-exec:1.12")
+    implementation("org.apache.commons:commons-lang3:3.20.0")
     runtimeOnly("org.slf4j:slf4j-simple:2.0.17")
 }
 

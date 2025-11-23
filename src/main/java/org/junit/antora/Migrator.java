@@ -3,6 +3,7 @@
  */
 package org.junit.antora;
 
+import org.apache.commons.lang3.StringUtils;
 import org.zeroturnaround.exec.ProcessExecutor;
 
 import java.io.IOException;
@@ -17,16 +18,19 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static java.nio.file.StandardOpenOption.APPEND;
+import static java.util.Objects.requireNonNull;
 import static java.util.Objects.requireNonNullElse;
 import static java.util.function.Predicate.isEqual;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toCollection;
+import static java.util.stream.Collectors.toMap;
 
 public class Migrator {
 
@@ -142,7 +146,7 @@ public class Migrator {
             doc.reduceHeadingLevel(1);
             doc.replaceTestDirs();
             doc.removeTopLevelAnchor();
-            doc.addAttribute("page-aliases", "index.adoc");
+            doc.addAttribute("page-aliases", "user-guide/index.adoc");
         });
         addPageToNavFileAndCommit(overviewFile);
     }
@@ -337,6 +341,7 @@ public class Migrator {
             doc.removeAuthors();
             doc.changeTitle("Release Notes");
             doc.removeAttributes("docinfodir", "docinfo2", "numbered!", "last-update-label!", "basedir");
+            doc.addAttribute("page-aliases", "release-notes/index.adoc");
             doc.replace("{basedir}", "partial$release-notes");
             doc.replace("include::{includedir}/link-attributes.adoc[]\n\n", "");
         });
@@ -369,7 +374,9 @@ public class Migrator {
     private void fixAllLinksAndIncludes() throws Exception {
         var documents = loadAllDocuments(pagesDir);
         documents.forEach(Document::collectAnchors);
-        documents.addAll(loadAllDocuments(partialsDir));
+        var partials = loadAllDocuments(partialsDir);
+        partials.forEach(Document::removeCommonAnchorPrefix);
+        documents.addAll(partials);
         documents.forEach(Document::replaceLinks);
         documents.forEach(doc -> {
             doc.replace("{experimentalApisTableFile}", "partial$experimental-apis-table.adoc");
@@ -579,33 +586,72 @@ public class Migrator {
         }
 
         void collectAnchors() {
+            var newRefs = findAllAnchorsAndRemoveCommonPrefix();
             var matcher = Pattern.compile("\\[\\[(.+?)]].*\n(?:\\[.+?]\n)?(?:(?:\\.|=+ )(.+?)\n)?").matcher(text);
             while (matcher.find()) {
                 var ref = matcher.group(1);
                 var title = matcher.group(2);
-                anchors.put(ref, new AnchorTarget.Fragment(file, title));
+                var newRef = requireNonNull(newRefs.get(ref));
+                anchors.put(ref, new AnchorTarget.Fragment(file, title, newRef));
             }
+            replaceAllRefs(newRefs);
+        }
+
+        public void removeCommonAnchorPrefix() {
+            replaceAllRefs(findAllAnchorsAndRemoveCommonPrefix());
+        }
+
+        private void replaceAllRefs(Map<String, String> newRefs) {
+            newRefs.forEach((oldRef, newRef) -> replace("[[%s]]".formatted(oldRef), "[[%s]]".formatted(newRef)));
+        }
+
+        private Map<String, String> findAllAnchorsAndRemoveCommonPrefix() {
+            var matcher = Pattern.compile("\\[\\[(.+?)]]").matcher(text);
+            List<String> allRefs = new ArrayList<>();
+            while (matcher.find()) {
+                allRefs.add(matcher.group(1));
+            }
+            var commonPrefix = StringUtils.getCommonPrefix(allRefs.toArray(String[]::new));
+            UnaryOperator<String> replacer;
+            if (commonPrefix.startsWith("release-notes-")) {
+                replacer = it -> "v" + it.substring("release-notes-".length());
+            } else if (commonPrefix.contains("-")) {
+                var commonPrefixLength = StringUtils.substringBeforeLast(commonPrefix, "-").length() + 1;
+                replacer = it -> it.substring(commonPrefixLength);
+            } else {
+                replacer = UnaryOperator.identity();
+            }
+            return allRefs.stream().collect(toMap(Function.identity(), replacer));
         }
 
         void replaceLinks() {
             var matcher = Pattern.compile("<<(?:\\.\\..+?#)?(.+?)(?:,\\s*((?:.|\n)+?))?>>").matcher(text);
+            List<Map.Entry<String, String>> replacements = new ArrayList<>();
             while (matcher.find()) {
                 var ref = matcher.group(1);
+                var title = matcher.group(2);
                 var target = anchors.get(ref);
                 if (target == null) {
                     throw new IllegalStateException("Unresolved link in %s: %s".formatted(pagesDir.relativize(file), matcher.group()));
                 }
-                if (!target.file().equals(file)) {
-                    var replacement = switch (target) {
+                String replacement;
+                if (target.file().equals(file)) {
+                    if (target instanceof AnchorTarget.Fragment fragment) {
+                        replacement = title == null ? "<<%s>>".formatted(fragment.newRef()) : "<<%s, %s>>".formatted(fragment.newRef(), title);
+                    } else {
+                        throw new IllegalStateException("Unexpected value: " + target);
+                    }
+                } else {
+                    replacement = switch (target) {
                         case AnchorTarget.Page page ->
-                                "xref:%s[%s]".formatted(pagesDir.relativize(page.file()), requireNonNullElse(matcher.group(2), ""));
+                                "xref:%s[%s]".formatted(pagesDir.relativize(page.file()), requireNonNullElse(title, ""));
                         case AnchorTarget.Fragment fragment ->
-                                "xref:%s#%s[%s]".formatted(pagesDir.relativize(fragment.file()), ref, requireNonNullElse(matcher.group(2), fragment.title()));
+                                "xref:%s#%s[%s]".formatted(pagesDir.relativize(fragment.file()), fragment.newRef(), requireNonNullElse(title, fragment.title()));
                     };
-                    text = matcher.replaceFirst(replacement);
-                    matcher.reset(text);
                 }
+                replacements.add(Map.entry(matcher.group(), replacement));
             }
+            replacements.forEach(entry -> replace(entry.getKey(), entry.getValue()));
         }
 
         void save() {
@@ -647,7 +693,7 @@ public class Migrator {
         record Page(Path file) implements AnchorTarget {
         }
 
-        record Fragment(Path file, String title) implements AnchorTarget {
+        record Fragment(Path file, String title, String newRef) implements AnchorTarget {
         }
     }
 }
