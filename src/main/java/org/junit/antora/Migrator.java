@@ -11,8 +11,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
@@ -21,6 +23,7 @@ import java.util.stream.IntStream;
 import java.util.stream.Stream;
 
 import static java.nio.file.StandardOpenOption.APPEND;
+import static java.util.Objects.requireNonNullElse;
 import static java.util.function.Predicate.isEqual;
 import static java.util.stream.Collectors.joining;
 import static java.util.stream.Collectors.toCollection;
@@ -45,6 +48,7 @@ public class Migrator {
 
     private final Path navFile;
 
+    private final Map<String, AnchorTarget> anchors = new HashMap<>();
     private int counter;
 
     public Migrator(Path projectDir) throws IOException {
@@ -78,8 +82,7 @@ public class Migrator {
         migrateReleaseNotes();
         migrateAppendix();
 
-        // TODO fix all links
-
+        fixAllLinks();
         deleteLeftoverAsciiDocResources();
     }
 
@@ -134,6 +137,7 @@ public class Migrator {
 
     private void migrateOverview() {
         var overviewFile = pagesDir.resolve("overview.adoc");
+        anchors.put("user-guide", new AnchorTarget.Page(overviewFile));
         migrate(asciidocSrcDir.resolve("user-guide/overview.adoc"), overviewFile, doc -> {
             doc.reduceHeadingLevel(1);
             doc.replaceTestDirs();
@@ -223,7 +227,8 @@ public class Migrator {
             doc.replaceTestDirs();
             doc.removeTopLevelAnchor();
             if ("overview.adoc".equals(doc.file.getFileName().toString())) {
-                doc.changeTitle("Extensions");
+                anchors.put("extensions", new AnchorTarget.Page(doc.file));
+                doc.changeTitle("Extension Model");
             }
             doc.save();
         });
@@ -254,7 +259,7 @@ public class Migrator {
         gitCommit("Migrate %s sections to Antora".formatted(mainSourceFile.getFileName()));
     }
 
-    private static List<Document> split(Path mainSourceFile, Path targetDir) throws Exception {
+    private List<Document> split(Path mainSourceFile, Path targetDir) throws Exception {
         var parts = Files.readString(mainSourceFile).splitWithDelimiters("\\[\\[.+]]\n=== ", -1);
         Files.createDirectories(targetDir);
         List<Document> docs = new ArrayList<>();
@@ -375,6 +380,26 @@ public class Migrator {
         addPageToNavFileAndCommit(appendixFile, 1);
     }
 
+    private void fixAllLinks() throws Exception {
+        var documents = loadAllDocuments();
+        documents.forEach(Document::collectAnchors);
+        documents.forEach(Document::replaceLinks);
+        documents.forEach(doc -> {
+            doc.save();
+            gitAdd(doc.file);
+        });
+        gitCommit("Fix links");
+    }
+
+    private List<Document> loadAllDocuments() throws Exception {
+        var pathMatcher = pagesDir.getFileSystem().getPathMatcher("glob:**/*.adoc");
+        try (var listing = Files.walk(pagesDir)) {
+            return listing.filter(pathMatcher::matches)
+                    .map(Document::new)
+                    .toList();
+        }
+    }
+
     private void deleteLeftoverAsciiDocResources() throws Exception {
         gitRmDir(asciidocSrcDir.resolve("docinfos"));
         gitRmDir(asciidocSrcDir.resolve("resources"));
@@ -404,7 +429,7 @@ public class Migrator {
         try {
             moveToAntora(source, target);
             if (consumer != null) {
-                var document = new Document(target, Files.readString(target));
+                var document = new Document(target);
                 consumer.accept(document);
                 document.save();
                 gitCommitSingleFile(target, "Migrate %s to Antora syntax".formatted(target.getFileName()));
@@ -478,7 +503,7 @@ public class Migrator {
         return IntStream.range(0, times).mapToObj(_ -> value).collect(joining());
     }
 
-    private static class Document {
+    private class Document {
 
         final Path file;
         String text;
@@ -488,8 +513,22 @@ public class Migrator {
             this.text = text;
         }
 
+        Document(Path file) {
+            this.file = file;
+            try {
+                this.text = Files.readString(file);
+            } catch (IOException e) {
+                throw new UncheckedIOException(e);
+            }
+        }
+
         void removeTopLevelAnchor() {
-            text = text.replaceFirst("^\\[\\[.+]]\\s*", "");
+            var pattern = Pattern.compile("^\\[\\[(.+?)]]\\s*");
+            var matcher = pattern.matcher(text);
+            if (matcher.find()) {
+                anchors.put(matcher.group(1), new AnchorTarget.Page(file));
+                text = matcher.replaceFirst("");
+            }
         }
 
         void removeAuthors() {
@@ -555,6 +594,36 @@ public class Migrator {
             ensureEndsWithNewLine();
         }
 
+        void collectAnchors() {
+            var matcher = Pattern.compile("\\[\\[(.+?)]].*\n(?:\\[.+?]\n)?(?:(?:\\.|=+ )(.+?)\n)?").matcher(text);
+            while (matcher.find()) {
+                var ref = matcher.group(1);
+                var title = matcher.group(2);
+                anchors.put(ref, new AnchorTarget.Fragment(file, title));
+            }
+        }
+
+        void replaceLinks() {
+            var matcher = Pattern.compile("<<(?:\\.\\..+?#)?(.+?)(?:,\\s*((?:.|\n)+?))?>>").matcher(text);
+            while (matcher.find()) {
+                var ref = matcher.group(1);
+                var target = anchors.get(ref);
+                if (target == null) {
+                    throw new IllegalStateException("Unresolved link in %s: %s".formatted(pagesDir.relativize(file), matcher.group()));
+                }
+                if (!target.file().equals(file)) {
+                    var replacement = switch (target) {
+                        case AnchorTarget.Page page ->
+                                "xref:%s[%s]".formatted(pagesDir.relativize(page.file()), requireNonNullElse(matcher.group(2), ""));
+                        case AnchorTarget.Fragment fragment ->
+                                "xref:%s#%s[%s]".formatted(pagesDir.relativize(fragment.file()), ref, requireNonNullElse(matcher.group(2), fragment.title()));
+                    };
+                    text = matcher.replaceFirst(replacement);
+                    matcher.reset(text);
+                }
+            }
+        }
+
         void save() {
             try {
                 Files.writeString(file, text);
@@ -585,6 +654,16 @@ public class Migrator {
             return "Document{" +
                     "file=" + file +
                     '}';
+        }
+    }
+
+    sealed interface AnchorTarget {
+        Path file();
+
+        record Page(Path file) implements AnchorTarget {
+        }
+
+        record Fragment(Path file, String title) implements AnchorTarget {
         }
     }
 }
