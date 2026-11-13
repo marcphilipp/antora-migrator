@@ -11,6 +11,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Properties;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
 import java.util.regex.MatchResult;
@@ -43,11 +45,22 @@ public class Migrator {
     /** Not included by any page but needed to compile the examples. */
     private static final Map<String, List<String>> EXAMPLE_DEPENDENCIES = Map.of("core", List.of("example/data"));
 
+    /** Kept in the site repository without a version: their repositories see no releases that would need one. */
+    private static final List<String> UNVERSIONED_MODULES = List.of("joda-time", "swing");
+
+    /** Modules whose documents are not named after them. */
+    private static final Map<String, String> SOURCE_NAMES = Map.of("joda-time", "joda");
+
+    /** Component titles that differ from the title of the wrapper document. */
+    private static final Map<String, String> TITLES = Map.of("joda-time", "AssertJ Joda Time");
+
     /** Pages that start with a hand-written table of contents, which the Antora UI renders itself. */
     private static final Map<String, List<String>> PAGES_WITH_MANUAL_TOC = Map.of(
             "core", List.of("extension.adoc", "release-notes.adoc"),
             "guava", List.of("release-notes.adoc"),
-            "db", List.of("concepts.adoc", "features.adoc", "release-notes.adoc")
+            "db", List.of("concepts.adoc", "features.adoc", "release-notes.adoc"),
+            "joda-time", List.of("release-notes.adoc"),
+            "swing", List.of("index.adoc")
     );
 
     private static final Map<String, String> SUBPAGE_SECTIONS = Map.of(
@@ -65,8 +78,8 @@ public class Migrator {
     );
 
     static void main(String[] args) throws Exception {
-        if (args.length != 3) {
-            throw new IllegalArgumentException("Usage: <doc repository dir> <assertj docs dir> <assertj-db docs dir>, but was:\n" + Arrays.toString(args));
+        if (args.length != 4) {
+            throw new IllegalArgumentException("Usage: <doc repository dir> <assertj docs dir> <assertj-db docs dir> <site dir>, but was:\n" + Arrays.toString(args));
         }
         var docDir = Path.of(args[0]).toAbsolutePath().normalize();
         var targetDir = Path.of(args[1]).toAbsolutePath().normalize();
@@ -78,9 +91,15 @@ public class Migrator {
         var dbTargetDir = Path.of(args[2]).toAbsolutePath().normalize();
         new Migrator(docDir, dbTargetDir, dbTargetDir, "db").run();
         writeAttributesTemplate(docDir, dbTargetDir, "assertj-db-version");
+        var siteDir = Path.of(args[3]).toAbsolutePath().normalize();
+        for (var module : UNVERSIONED_MODULES) {
+            new Migrator(docDir, siteDir, siteDir.resolve("assertj-" + module), module).run();
+        }
     }
 
     private final String module;
+    private final String sourceName;
+    private final Path docDir;
     private final Path userGuideDir;
     private final Path testJavaDir;
     private final Path targetDir;
@@ -99,7 +118,9 @@ public class Migrator {
 
     private Migrator(Path docDir, Path targetDir, Path componentDir, String module) {
         this.module = module;
+        this.docDir = docDir;
         this.targetDir = targetDir;
+        sourceName = SOURCE_NAMES.getOrDefault(module, module);
         this.componentDir = componentDir;
         userGuideDir = docDir.resolve("src/docs/asciidoc/user-guide");
         testJavaDir = docDir.resolve("src/test/java");
@@ -109,8 +130,8 @@ public class Migrator {
 
     private void run() throws IOException {
         // the wrapper document becomes the module's start page, the documents it includes become pages
-        var index = load(userGuideDir.resolve("assertj-%s.adoc".formatted(module)), pagesDir.resolve("index.adoc"));
-        var includes = Pattern.compile("(?m)^include::(assertj-%s-(.+)\\.adoc)\\[]\n*".formatted(module)).matcher(index.text);
+        var index = load(userGuideDir.resolve("assertj-%s.adoc".formatted(sourceName)), pagesDir.resolve("index.adoc"));
+        var includes = Pattern.compile("(?m)^include::(assertj-%s-(.+)\\.adoc)\\[]\n*".formatted(sourceName)).matcher(index.text);
         var included = includes.results().toList();
         index.text = includes.replaceAll("").strip();
         var title = index.text.lines().filter(line -> line.startsWith("=")).findFirst().orElseThrow().replaceFirst("^=+ ", "");
@@ -143,13 +164,13 @@ public class Migrator {
         }
         Files.write(moduleDir.resolve("nav.adoc"), nav);
         copyExamples();
-        writeAntoraYml(title);
+        writeAntoraYml(TITLES.getOrDefault(module, title));
         copyImages();
         System.out.printf("Module '%s': %d pages%n", module, documents.size());
     }
 
     private void checkAllDocumentsAreIncluded(List<MatchResult> included) throws IOException {
-        try (var files = Files.newDirectoryStream(userGuideDir, "assertj-%s-*.adoc".formatted(module))) {
+        try (var files = Files.newDirectoryStream(userGuideDir, "assertj-%s-*.adoc".formatted(sourceName))) {
             for (var file : files) {
                 if (included.stream().noneMatch(include -> include.group(1).equals(file.getFileName().toString()))) {
                     throw new IllegalStateException("Not included by the %s wrapper document: %s".formatted(module, file));
@@ -263,23 +284,44 @@ public class Migrator {
         Files.copy(source, target, REPLACE_EXISTING);
     }
 
-    /** Version and attributes are not here: the collector overlays them from the file Maven filters. */
     private void writeAntoraYml(String title) throws IOException {
-        Files.writeString(componentDir.resolve("antora.yml"), """
+        var unversioned = UNVERSIONED_MODULES.contains(module);
+        var yml = """
                 name: assertj-%s
                 title: %s
-                version: true
+                version: %s
                 nav:
                   - modules/ROOT/nav.adoc
-                ext:
-                  collector:
-                    - run:
-                        command: ./mvnw -q -f docs process-resources
-                        local: true
-                      scan:
-                        - dir: docs/target/antora
-                """.formatted(module, title)
-                + (hasExamples ? "        - dir: docs/src/test/java\n          into: modules/ROOT/examples/java\n" : ""));
+                """.formatted(module, title, unversioned ? "~" : "true");
+        if (unversioned) {
+            yml += "asciidoc:\n  attributes:\n" + toYaml(fixedAttributes());
+        } else {
+            // version and attributes are not here: the collector overlays them from the file Maven filters
+            yml += """
+                    ext:
+                      collector:
+                        - run:
+                            command: ./mvnw -q -f docs process-resources
+                            local: true
+                          scan:
+                            - dir: docs/target/antora
+                    """ + (hasExamples ? "        - dir: docs/src/test/java\n          into: modules/ROOT/examples/java\n" : "");
+        }
+        Files.writeString(componentDir.resolve("antora.yml"), yml);
+    }
+
+    /** The attributes this module's pages use, with the versions of the old build: no Maven build provides them here. */
+    private Map<String, String> fixedAttributes() throws IOException {
+        var versions = new Properties();
+        try (var reader = Files.newBufferedReader(docDir.resolve("gradle.properties"))) {
+            versions.load(reader);
+        }
+        Map<String, String> attributes = new LinkedHashMap<>();
+        attributes.put("assertj-version", Objects.requireNonNull(versions.getProperty("assertjVersion")));
+        attributes.put("assertj-joda-time-version", Objects.requireNonNull(versions.getProperty("assertjJodaTimeVersion")));
+        addLinkAttributes(docDir, attributes);
+        attributes.keySet().removeIf(name -> documents.stream().noneMatch(doc -> doc.text.contains("{%s}".formatted(name))));
+        return attributes;
     }
 
     /** Shared by all components and filtered by Maven, so that versions come from the pom. */
@@ -291,6 +333,19 @@ public class Migrator {
         attributes.put("tabsize", "3");
         attributes.put("source-indent", "0");
         attributes.put(versionAttribute, "${project.version}");
+        addLinkAttributes(docDir, attributes);
+        var template = targetDir.resolve("antora-resources/antora.yml");
+        Files.createDirectories(template.getParent());
+        Files.writeString(template, """
+                version: ${antora-component.version}
+                prerelease: ${antora-component.prerelease}
+                asciidoc:
+                  attributes:
+                """ + toYaml(attributes));
+    }
+
+    /** Adds the link attributes of the old guide, with the given attributes resolved in their values. */
+    private static void addLinkAttributes(Path docDir, Map<String, String> attributes) throws IOException {
         var attributePattern = Pattern.compile("^:(.+?):\\s+(.+)$");
         for (var line : Files.readAllLines(docDir.resolve("src/docs/asciidoc/link-attributes.adoc"))) {
             var matcher = attributePattern.matcher(line);
@@ -306,16 +361,12 @@ public class Migrator {
                 }
             }
         }
-        var yml = new StringBuilder("""
-                version: ${antora-component.version}
-                prerelease: ${antora-component.prerelease}
-                asciidoc:
-                  attributes:
-                """);
+    }
+
+    private static String toYaml(Map<String, String> attributes) {
+        var yml = new StringBuilder();
         attributes.forEach((name, value) -> yml.append("    %s: '%s'\n".formatted(name, value.replace("'", "''"))));
-        var template = targetDir.resolve("antora-resources/antora.yml");
-        Files.createDirectories(template.getParent());
-        Files.writeString(template, yml);
+        return yml.toString();
     }
 
     /** Same result as Asciidoctor's section id generation with an empty idprefix and '-' as idseparator. */
