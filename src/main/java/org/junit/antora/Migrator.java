@@ -41,12 +41,13 @@ public class Migrator {
     /** Stays a plain Antora example because it never compiled: it lacks imports and fields. */
     private static final List<String> UNCOMPILED_EXAMPLES = List.of("example/core/AssumptionsDemo.java");
     /** Not included by any page but needed to compile the examples. */
-    private static final List<String> EXAMPLE_DEPENDENCIES = List.of("example/data");
+    private static final Map<String, List<String>> EXAMPLE_DEPENDENCIES = Map.of("core", List.of("example/data"));
 
     /** Pages that start with a hand-written table of contents, which the Antora UI renders itself. */
     private static final Map<String, List<String>> PAGES_WITH_MANUAL_TOC = Map.of(
             "core", List.of("extension.adoc", "release-notes.adoc"),
-            "guava", List.of("release-notes.adoc")
+            "guava", List.of("release-notes.adoc"),
+            "db", List.of("concepts.adoc", "features.adoc", "release-notes.adoc")
     );
 
     private static final Map<String, String> SUBPAGE_SECTIONS = Map.of(
@@ -64,20 +65,25 @@ public class Migrator {
     );
 
     static void main(String[] args) throws Exception {
-        if (args.length != 2) {
-            throw new IllegalArgumentException("Usage: <doc repository dir> <target documentation dir>, but was:\n" + Arrays.toString(args));
+        if (args.length != 3) {
+            throw new IllegalArgumentException("Usage: <doc repository dir> <assertj docs dir> <assertj-db docs dir>, but was:\n" + Arrays.toString(args));
         }
         var docDir = Path.of(args[0]).toAbsolutePath().normalize();
         var targetDir = Path.of(args[1]).toAbsolutePath().normalize();
         for (var module : MODULES) {
-            new Migrator(docDir, targetDir, module).run();
+            new Migrator(docDir, targetDir, targetDir.resolve("assertj-" + module), module).run();
         }
-        writeAttributesTemplate(docDir, targetDir);
+        writeAttributesTemplate(docDir, targetDir, "assertj-version");
+        // the only component of its repository, so the docs dir itself is the component
+        var dbTargetDir = Path.of(args[2]).toAbsolutePath().normalize();
+        new Migrator(docDir, dbTargetDir, dbTargetDir, "db").run();
+        writeAttributesTemplate(docDir, dbTargetDir, "assertj-db-version");
     }
 
     private final String module;
     private final Path userGuideDir;
     private final Path testJavaDir;
+    private final Path targetDir;
     private final Path componentDir;
     private final Path moduleDir;
     private final Path pagesDir;
@@ -91,11 +97,12 @@ public class Migrator {
     /** Auto-generated section ids, for links that rely on them or reference a section by title. */
     private final Map<String, AnchorTarget> autoAnchors = new HashMap<>();
 
-    private Migrator(Path docDir, Path targetDir, String module) {
+    private Migrator(Path docDir, Path targetDir, Path componentDir, String module) {
         this.module = module;
+        this.targetDir = targetDir;
+        this.componentDir = componentDir;
         userGuideDir = docDir.resolve("src/docs/asciidoc/user-guide");
         testJavaDir = docDir.resolve("src/test/java");
-        componentDir = targetDir.resolve("assertj-" + module);
         moduleDir = componentDir.resolve("modules/ROOT");
         pagesDir = moduleDir.resolve("pages");
     }
@@ -182,7 +189,11 @@ public class Migrator {
 
     /** Copies this module's and the BOM's sections of the appendix, so quickstart links stay in the module. */
     private void migrateDependencyMetadata() throws IOException {
-        var parts = Files.readString(userGuideDir.resolve("assertj-appendix.adoc")).split("(?=\\[\\[dependency-metadata-)");
+        var appendix = Files.readString(userGuideDir.resolve("assertj-appendix.adoc"));
+        if (!appendix.contains("[[dependency-metadata-assertj-%s]]".formatted(module))) {
+            return;
+        }
+        var parts = appendix.split("(?=\\[\\[dependency-metadata-)");
         var text = new StringBuilder(parts[0].replaceFirst("^== .+\n+", ""));
         for (var i = 1; i < parts.length; i++) {
             if (parts[i].startsWith("[[dependency-metadata-assertj-%s]]".formatted(module))
@@ -226,7 +237,7 @@ public class Migrator {
 
     /** Examples go to the Maven test sources so they are compiled; the collector hands them to Antora from there. */
     private void copyExamples() throws IOException {
-        var compiledDir = componentDir.resolveSibling("src/test/java");
+        var compiledDir = targetDir.resolve("src/test/java");
         var pattern = Pattern.compile("include::example\\$java/(.+?)\\[");
         for (var doc : documents) {
             for (var include : pattern.matcher(doc.text).results().toList()) {
@@ -237,7 +248,7 @@ public class Migrator {
             }
         }
         if (hasExamples) {
-            for (var dir : EXAMPLE_DEPENDENCIES) {
+            for (var dir : EXAMPLE_DEPENDENCIES.getOrDefault(module, List.of())) {
                 try (var files = Files.newDirectoryStream(testJavaDir.resolve(dir))) {
                     for (var file : files) {
                         copy(file, compiledDir.resolve(dir).resolve(file.getFileName()));
@@ -272,14 +283,14 @@ public class Migrator {
     }
 
     /** Shared by all components and filtered by Maven, so that versions come from the pom. */
-    private static void writeAttributesTemplate(Path docDir, Path targetDir) throws IOException {
+    private static void writeAttributesTemplate(Path docDir, Path targetDir, String versionAttribute) throws IOException {
         Map<String, String> attributes = new LinkedHashMap<>();
         // the old build used these, links to auto-generated section ids depend on them
         attributes.put("idprefix", "");
         attributes.put("idseparator", "-");
         attributes.put("tabsize", "3");
         attributes.put("source-indent", "0");
-        attributes.put("assertj-version", "${project.version}");
+        attributes.put(versionAttribute, "${project.version}");
         var attributePattern = Pattern.compile("^:(.+?):\\s+(.+)$");
         for (var line : Files.readAllLines(docDir.resolve("src/docs/asciidoc/link-attributes.adoc"))) {
             var matcher = attributePattern.matcher(line);

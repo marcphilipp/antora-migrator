@@ -21,5 +21,5 @@ tasks.named<Test>("test") {
 }
 
 tasks.run {
-    args("../doc", "../assertj/docs")
+    args("../doc", "../assertj/docs", "../assertj-db/docs")
 }
